@@ -87,8 +87,11 @@ During early boot (in the initramfs, before the overlay is assembled):
 3. Deletes files from lower that exist in upper (will be replaced)
 4. Copies all files from upper to lower, preserving extended attributes (including SELinux labels)
 5. Clears the upper layer
-6. Remounts the lower filesystem read-only
-7. Drops a `/overlayroot.resynced` marker in the upper layer
+6. If `/var/log/journal` existed in the upper layer, recreates it so that persistent journald logging (`Storage=auto`) continues to work
+7. Remounts the lower filesystem read-only
+8. Drops a `/overlayroot.resynced` marker in the upper layer
+
+Temporary and log files are excluded from the resync to avoid polluting the lower filesystem with transient data. The excluded paths are: `/tmp`, `/var/tmp`, `/var/log`.
 
 ### Post-resync SELinux relabel
 

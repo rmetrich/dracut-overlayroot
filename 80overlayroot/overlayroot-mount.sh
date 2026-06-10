@@ -74,6 +74,8 @@ fi
 if [ "$resync" -eq 1 ]; then
     info "overlayroot: resyncing upper to lower ..."
 
+    resync_exclude="./tmp ./var/tmp ./var/log"
+
     mount -o remount,rw /run/overlayroot/ro
 
     info "overlayroot: deleting whiteouts from lower ..."
@@ -83,15 +85,23 @@ if [ "$resync" -eq 1 ]; then
     done
 
     info "overlayroot: deleting modified files from lower ..."
-    (cd /run/overlayroot/rw/upper && find . ! -type d -print0) | (cd /run/overlayroot/ro && xargs -0 rm -rf)
+    (cd /run/overlayroot/rw/upper && find . ! -type d $(printf -- '-not -path %s* ' $resync_exclude) -print0) | (cd /run/overlayroot/ro && xargs -0 rm -rf)
 
     info "overlayroot: copying upper to lower ..."
-    (cd /run/overlayroot/rw/upper && tar --xattrs --xattrs-include='*' -cf - .) | (cd /run/overlayroot/ro && tar --xattrs --xattrs-include='*' -xf -)
+    (cd /run/overlayroot/rw/upper && tar --xattrs --xattrs-include='*' $(printf -- '--exclude=%s ' $resync_exclude) -cf - .) | (cd /run/overlayroot/ro && tar --xattrs --xattrs-include='*' -xf -)
 
     rm -f /run/overlayroot/ro/overlayroot.resync
 
+    has_journal=0
+    [ -d /run/overlayroot/rw/upper/var/log/journal ] && has_journal=1
+
     info "overlayroot: clearing upper ..."
     rm -rf /run/overlayroot/rw/upper/* /run/overlayroot/rw/upper/.*
+
+    if [ "$has_journal" -eq 1 ]; then
+        info "overlayroot: recreating /var/log/journal for persistent journald"
+        mkdir -p /run/overlayroot/rw/upper/var/log/journal
+    fi
 
     touch /run/overlayroot/rw/upper/overlayroot.resynced
 
