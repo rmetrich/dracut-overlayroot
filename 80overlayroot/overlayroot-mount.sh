@@ -7,10 +7,17 @@ overlayroot=$(getarg overlayroot=)
 
 info "overlayroot: setting up overlay with '$overlayroot'"
 
-mkdir -m 0755 -p /run/overlayroot/ro
-mount --bind "$NEWROOT" /run/overlayroot/ro
-mount --make-private /run/overlayroot/ro
-mount -o remount,ro /run/overlayroot/ro
+basedir="/run/overlayroot"
+lower="$basedir/ro"
+baserw="$basedir/rw"
+
+upper="$baserw/upper"
+work="$baserw/work"
+
+mkdir -m 0755 -p $lower
+mount --bind "$NEWROOT" $lower
+mount --make-private $lower
+mount -o remount,ro $lower
 
 use_tmpfs=0
 
@@ -29,7 +36,7 @@ case "$overlayroot" in
         ;;
 esac
 
-mkdir -m 0755 -p /run/overlayroot/rw
+mkdir -m 0755 -p $baserw
 
 if [ "$use_tmpfs" -eq 0 ]; then
     timeout=$(getarg overlayroot.timeout=)
@@ -45,7 +52,7 @@ if [ "$use_tmpfs" -eq 0 ]; then
     fi
 
     if [ -b "$dev" ]; then
-        if mount "$dev" /run/overlayroot/rw; then
+        if mount "$dev" $baserw; then
             info "overlayroot: mounted $dev as upper layer (persistent)"
         else
             warn "overlayroot: failed to mount $dev, falling back to tmpfs"
@@ -58,73 +65,111 @@ if [ "$use_tmpfs" -eq 0 ]; then
 fi
 
 if [ "$use_tmpfs" -eq 1 ]; then
-    mount -t tmpfs tmpfs /run/overlayroot/rw
+    mount -t tmpfs tmpfs $baserw
     info "overlayroot: using tmpfs as upper layer (ephemeral)"
 fi
 
-mkdir -m 0755 -p /run/overlayroot/rw/upper
-mkdir -m 0755 -p /run/overlayroot/rw/work
+mkdir -m 0755 -p $upper
+mkdir -m 0755 -p $work
 
 resync=0
 if [ "$use_tmpfs" -eq 0 ]; then
-    if getargbool 0 overlayroot.resync || [ -e /run/overlayroot/rw/upper/overlayroot.resync ]; then
+    if getargbool 0 overlayroot.resync || [ -e "$upper/overlayroot.resync" ]; then
         resync=1
     fi
 fi
 
 if [ "$resync" -eq 1 ]; then
-    resync_log=/run/overlayroot/rw/overlayroot.output
+
+    tmpstore="$baserw/tmp"
+
+    resync_logname="overlayroot.output"
+    # Log is stored outside of upper initially to avoid being deleted
+    resync_log="$baserw/$resync_logname"
+
+    rm -f $resync_log
+
     ovl_log() { echo "$(date '+%H:%M:%S') $*" >> "$resync_log"; info "overlayroot: $*"; }
 
     ovl_log "resyncing upper to lower ..."
 
-    resync_exclude="tmp var/tmp var/log overlayroot.resync"
+    resync_exclude=(
+        /tmp /var/tmp /var/log
+        /overlayroot.resync /$resync_logname
+        /etc/systemd/journald.conf.d/usb.conf
+        /.autorelabel /etc/selinux/config
+    )
 
-    mount -o remount,rw /run/overlayroot/ro
+    mount -o remount,rw $lower
 
     ovl_log "processing whiteouts ..."
-    (cd /run/overlayroot/rw/upper && find . -type c -print) | while read path; do
-        [ "$(stat -c '%t %T' "/run/overlayroot/rw/upper/$path")" = "0 0" ] || continue
+    (cd $upper && find . -type c -print) | while read path; do
+        [ "$(stat -c '%t %T' "$upper/$path")" = "0 0" ] || continue
         ovl_log "  whiteout: $path"
-        rm -rf "/run/overlayroot/ro/$path" "/run/overlayroot/rw/upper/$path"
+        rm -rf "$lower/$path" "$upper/$path"
     done
 
     ovl_log "syncing upper to lower ..."
-    rsync -aHAX -v $(printf -- '--exclude=%s ' $resync_exclude) \
-        /run/overlayroot/rw/upper/ /run/overlayroot/ro/ >>"$resync_log" 2>&1
+    rsync -aHAXX -v $(printf -- '--exclude=%s ' ${resync_exclude[@]}) \
+        $upper/ $lower/ >>"$resync_log" 2>&1
     rc=$?
 
-    rm -f /run/overlayroot/ro/overlayroot.resync
+    rm -f $lower/overlayroot.resync
 
     if [ "$rc" -ne 0 ]; then
         ovl_log "ERROR: rsync failed (exit $rc), keeping upper intact"
-        mount -o remount,ro /run/overlayroot/ro
+        mount -o remount,ro $lower
     else
-        has_journal=0
-        [ -d /run/overlayroot/rw/upper/var/log/journal ] && has_journal=1
+
+        expand_paths() {
+            awk '{
+                for (i = 1; i <= NF; i++) {
+                    n = split($i, parts, "/")
+                    path = ""
+                    for (j = 2; j <= n; j++) {
+                        path = path "/" parts[j]
+                        printf "%s%s", path, (i == NF && j == n ? ORS : " ")
+                    }
+                }
+            }' "${@:--}"
+        }
+
+        ovl_log "copying persistent files to temporary storage ..."
+        mkdir -p $tmpstore
+        persistent_files=( /etc/systemd/journald.conf.d/usb.conf )
+        expanded_paths=$(expand_paths <<< ${persistent_files[@]})
+        rsync -aHAXX -v $(printf -- '--include=%s ' $expanded_paths) --exclude='*' \
+            $upper/ $tmpstore/ >>"$resync_log" 2>&1
 
         ovl_log "clearing upper ..."
-        rm -rf /run/overlayroot/rw/upper
-        mkdir /run/overlayroot/rw/upper
+        rm -rf $upper
+        mkdir $upper
 
-        if [ "$has_journal" -eq 1 ]; then
-            ovl_log "recreating /var/log/journal for persistent journald"
-            mkdir -p /run/overlayroot/rw/upper/var/log/journal
-        fi
+        ovl_log "restoring persistent files on upper ..."
+        rsync -aHAXX -v $(printf -- '--include=%s ' $expanded_paths) --exclude='*' \
+            $tmpstore/ $upper/ >>"$resync_log" 2>&1
+        rm -rf $tmpstore
 
-        touch /run/overlayroot/rw/upper/overlayroot.resynced
+        # Amend /etc/selinux/config on upper to relabel in Permissive
+        selinux_includes=( /etc/selinux/config )
+        expanded_paths=$(expand_paths <<< ${selinux_includes[@]})
+        ovl_log "copying lower /etc/selinux/config to upper ..."
+        rsync -aHAXX -v $(printf -- '--include=%s ' $expanded_paths) --exclude='*' \
+            $lower/ $upper/ >>"$resync_log" 2>&1
+        ovl_log "changing to Permissive and forcing a relabel ..."
+        sed -i "s/^SELINUX=enforcing/SELINUX=permissive/" $upper/etc/selinux/config
+        echo "-v" > $upper/.autorelabel
 
-        mount -o remount,ro /run/overlayroot/ro
+        mount -o remount,ro $lower
 
         ovl_log "resync complete"
+
     fi
 
-    mv $resync_log /run/overlayroot/rw/upper
+    mv $resync_log "$upper/$resync_logname"
 fi
 
-mount -t overlay overlay \
-    -o lowerdir=/run/overlayroot/ro,upperdir=/run/overlayroot/rw/upper,workdir=/run/overlayroot/rw/work \
-    "$NEWROOT"
+mount -t overlay overlay -o xino=on,lowerdir=$lower,upperdir=$upper,workdir=$work "$NEWROOT"
 
 if [ "$use_tmpfs" -eq 1 ]; then
     mkdir -p "$NEWROOT/etc"
@@ -139,25 +184,9 @@ fi
 
 # Exclude overlay internals from fixfiles relabeling
 excludefile="$NEWROOT/etc/selinux/fixfiles_exclude_dirs"
-grep -qsxF '/run/overlayroot' "$excludefile" 2>/dev/null || echo '/run/overlayroot' >> "$excludefile"
+grep -qsxF "$basedir" "$excludefile" 2>/dev/null || echo "$basedir" >> "$excludefile"
 
 # SELinux equivalency so restorecon maps overlay paths to / policy rules
 subsfile="$NEWROOT/etc/selinux/targeted/contexts/files/file_contexts.subs"
-grep -qsF '/run/overlayroot/rw/upper' "$subsfile" 2>/dev/null || echo '/run/overlayroot/rw/upper /' >> "$subsfile"
-
-# Oneshot service to relabel upper layer files written during initramfs (post-resync)
-mkdir -p "$NEWROOT/etc/systemd/system/sysinit.target.wants"
-cat > "$NEWROOT/etc/systemd/system/overlayroot-relabel.service" <<'EOF'
-[Unit]
-Description=Relabel overlay upper layer for SELinux after resync
-DefaultDependencies=no
-ConditionPathExists=/overlayroot.resynced
-After=local-fs.target
-Before=sysinit.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'find /run/overlayroot/rw/upper -xdev -print0 | xargs -0 restorecon -i -F'
-ExecStartPost=/bin/rm -f /overlayroot.resynced
-EOF
-ln -sf ../overlayroot-relabel.service "$NEWROOT/etc/systemd/system/sysinit.target.wants/"
+grep -qsF "$upper" "$subsfile" 2>/dev/null || echo "$upper /" >> "$subsfile"
+grep -qsF "$lower" "$subsfile" 2>/dev/null || echo "$lower /" >> "$subsfile"

@@ -14,6 +14,6 @@ installkernel() {
 }
 
 install() {
-    inst_multiple mount mkdir sleep stat find rm rsync xargs touch grep cat ln date
+    inst_multiple mount mkdir sleep stat find rm rsync xargs touch grep cat date sed awk
     inst_hook pre-pivot 20 "$moddir/overlayroot-mount.sh"
 }
