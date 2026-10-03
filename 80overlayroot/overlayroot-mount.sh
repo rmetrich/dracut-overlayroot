@@ -52,11 +52,25 @@ if [ "$use_tmpfs" -eq 0 ]; then
     fi
 
     if [ -b "$dev" ]; then
-        if mount "$dev" $baserw; then
-            info "overlayroot: mounted $dev as upper layer (persistent)"
-        else
-            warn "overlayroot: failed to mount $dev, falling back to tmpfs"
-            use_tmpfs=1
+        if ! getargbool 0 overlayroot.nofsck; then
+            info "overlayroot: running fsck on $dev ..."
+            fsck -a "$dev"
+            fsck_rc=$?
+            if [ "$fsck_rc" -ge 4 ]; then
+                warn "overlayroot: fsck on $dev could not fix errors (rc=$fsck_rc), falling back to tmpfs"
+                use_tmpfs=1
+            else
+                [ "$fsck_rc" -eq 1 ] && info "overlayroot: fsck corrected errors on $dev"
+                [ "$fsck_rc" -eq 2 ] && warn "overlayroot: fsck repaired $dev but a reboot is recommended"
+            fi
+        fi
+        if [ "$use_tmpfs" -eq 0 ]; then
+            if mount "$dev" $baserw; then
+                info "overlayroot: mounted $dev as upper layer (persistent)"
+            else
+                warn "overlayroot: failed to mount $dev, falling back to tmpfs"
+                use_tmpfs=1
+            fi
         fi
     else
         warn "overlayroot: device $dev not found after ${timeout}s, falling back to tmpfs"

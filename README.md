@@ -21,6 +21,7 @@ dracut -f
 | `overlayroot=/dev/<device>` | Use the given block device as the persistent upper layer |
 | `overlayroot=tmpfs` | Use tmpfs as the upper layer (ephemeral, all changes lost on reboot) |
 | `overlayroot.timeout=<seconds>` | Time to wait for the upper layer device to appear (default: 10) |
+| `overlayroot.nofsck` | Skip the automatic fsck on the upper layer |
 | `overlayroot.resync` | One-shot: resync upper layer changes to lower before mounting overlay |
 
 ## Mount layout
@@ -113,6 +114,7 @@ The module automatically configures SELinux for overlay operation on each boot:
 /usr/lib/dracut/modules.d/80overlayroot/
     module-setup.sh          # Module installation and dependencies
     overlayroot-mount.sh     # Pre-pivot hook: sets up overlay, resync, SELinux
+    overlayroot-cleanup.sh   # Shutdown hook: unmounts overlay layers cleanly
 /etc/dracut.conf.d/
     overlayroot.conf         # Ensures module is included in initramfs
 ```
