@@ -54,7 +54,7 @@ if [ "$use_tmpfs" -eq 0 ]; then
     if [ -b "$dev" ]; then
         if ! getargbool 0 overlayroot.nofsck; then
             info "overlayroot: running fsck on $dev ..."
-            fsck -a "$dev"
+            fsck -y "$dev"
             fsck_rc=$?
             if [ "$fsck_rc" -ge 4 ]; then
                 warn "overlayroot: fsck on $dev could not fix errors (rc=$fsck_rc), falling back to tmpfs"
